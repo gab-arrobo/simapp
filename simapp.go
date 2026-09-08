@@ -69,7 +69,11 @@ type DevGroup struct {
 	Name         string     `yaml:"name,omitempty"`
 	SiteInfo     string     `yaml:"site-info,omitempty" json:"site-info,omitempty"`
 	Imsis        []string   `yaml:"imsis,omitempty" json:"imsis,omitempty"`
+	ImsiStart    string     `yaml:"imsi-start,omitempty" json:"imsi-start,omitempty"`
+	ImsiEnd      string     `yaml:"imsi-end,omitempty" json:"imsi-end,omitempty"`
 	Msisdns      []string   `yaml:"msisdns,omitempty" json:"msisdns,omitempty"`
+	MsisdnStart  string     `yaml:"msisdn-start,omitempty" json:"msisdn-start,omitempty"`
+	MsisdnEnd    string     `yaml:"msisdn-end,omitempty" json:"msisdn-end,omitempty"`
 	IpDomainName string     `yaml:"ip-domain-name,omitempty" json:"ip-domain-name,omitempty"`
 	IpDomains    []IpDomain `yaml:"ip-domains,omitempty" json:"ip-domains,omitempty"`
 	visited      bool
@@ -678,8 +682,18 @@ func compareGroup(groupNew *DevGroup, groupOld *DevGroup) bool {
 		return true
 	}
 
+	if groupNew.ImsiStart != groupOld.ImsiStart || groupNew.ImsiEnd != groupOld.ImsiEnd {
+		logger.SimappLog.Infoln("imsi range changed")
+		return true
+	}
+
 	if len(groupNew.Imsis) != len(groupOld.Imsis) {
 		logger.SimappLog.Infoln("number of Imsis changed")
+		return true
+	}
+
+	if groupNew.MsisdnStart != groupOld.MsisdnStart || groupNew.MsisdnEnd != groupOld.MsisdnEnd {
+		logger.SimappLog.Infoln("msisdn range changed")
 		return true
 	}
 
@@ -1089,10 +1103,87 @@ func dispatchAllSubscribers(configMsgChan chan configMessage, wg *sync.WaitGroup
 	}
 }
 
+func splitNumericSuffix(value string) (string, uint64, int, error) {
+	index := len(value)
+	for index > 0 && value[index-1] >= '0' && value[index-1] <= '9' {
+		index--
+	}
+	if index == len(value) {
+		return "", 0, 0, fmt.Errorf("missing numeric suffix")
+	}
+
+	number, err := strconv.ParseUint(value[index:], 10, 64)
+	if err != nil {
+		return "", 0, 0, err
+	}
+	return value[:index], number, len(value) - index, nil
+}
+
 func dispatchGroup(configMsgChan chan configMessage, group *DevGroup, msgOp int, wg *sync.WaitGroup) {
 	if !SimappConfig.Configuration.ConfigSliceDevGroup {
 		logger.SimappLog.Warnln("do not configure device group")
 		return
+	}
+	groupCopy := *group
+	group = &groupCopy
+	if msgOp != delete_op && (group.ImsiStart != "" || group.ImsiEnd != "") {
+		if group.ImsiStart == "" || group.ImsiEnd == "" {
+			logger.SimappLog.Errorf("incomplete IMSI range %q-%q for group %s (both imsi-start and imsi-end are required)", group.ImsiStart, group.ImsiEnd, group.Name)
+			return
+		}
+		start, startErr := strconv.ParseUint(group.ImsiStart, 10, 64)
+		end, endErr := strconv.ParseUint(group.ImsiEnd, 10, 64)
+		if startErr != nil || endErr != nil || start > end {
+			logger.SimappLog.Errorf("invalid IMSI range %q-%q for group %s", group.ImsiStart, group.ImsiEnd, group.Name)
+			return
+		}
+		diff := end - start
+		if diff == ^uint64(0) {
+			logger.SimappLog.Errorf("IMSI range too large %q-%q for group %s", group.ImsiStart, group.ImsiEnd, group.Name)
+			return
+		}
+		count := diff + 1
+		if count > uint64(^uint(0)>>1) {
+			logger.SimappLog.Errorf("IMSI range too large %q-%q for group %s", group.ImsiStart, group.ImsiEnd, group.Name)
+			return
+		}
+		group.Imsis = make([]string, 0, int(count))
+		for imsi := start; ; imsi++ {
+			group.Imsis = append(group.Imsis, fmt.Sprintf("%015d", imsi))
+			if imsi == end {
+				break
+			}
+		}
+	}
+	if msgOp != delete_op && (group.MsisdnStart != "" || group.MsisdnEnd != "") {
+		if group.MsisdnStart == "" || group.MsisdnEnd == "" {
+			logger.SimappLog.Errorf("incomplete MSISDN range %q-%q for group %s (both msisdn-start and msisdn-end are required)", group.MsisdnStart, group.MsisdnEnd, group.Name)
+			return
+		}
+		prefix, start, width, startErr := splitNumericSuffix(group.MsisdnStart)
+		endPrefix, end, endWidth, endErr := splitNumericSuffix(group.MsisdnEnd)
+		if startErr != nil || endErr != nil || prefix != endPrefix || width != endWidth || start > end {
+			logger.SimappLog.Errorf("invalid MSISDN range %q-%q for group %s", group.MsisdnStart, group.MsisdnEnd, group.Name)
+			return
+		}
+		diff := end - start
+		if diff == ^uint64(0) {
+			logger.SimappLog.Errorf("MSISDN range too large %q-%q for group %s", group.MsisdnStart, group.MsisdnEnd, group.Name)
+			return
+		}
+		count := diff + 1
+		if count > uint64(^uint(0)>>1) {
+			logger.SimappLog.Errorf("MSISDN range too large %q-%q for group %s", group.MsisdnStart, group.MsisdnEnd, group.Name)
+			return
+		}
+
+		group.Msisdns = make([]string, 0, int(count))
+		for msisdn := start; ; msisdn++ {
+			group.Msisdns = append(group.Msisdns, fmt.Sprintf("%s%0*d", prefix, width, msisdn))
+			if msisdn == end {
+				break
+			}
+		}
 	}
 	logger.SimappLog.Infoln("group name", group.Name)
 	logger.SimappLog.Infoln("site name", group.SiteInfo)
