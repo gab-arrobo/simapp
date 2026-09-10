@@ -9,12 +9,10 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha1"
-	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -32,7 +30,6 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.yaml.in/yaml/v4"
-	"golang.org/x/net/http2"
 )
 
 type Config struct {
@@ -262,16 +259,24 @@ func InitConfigFactory(f string, subProvisionEndpt *SubProvisionEndpt, subProxyE
 	}
 
 	// set http client
-	if SimappConfig.Info.HttpVersion == 2 {
+	httpVersion := 1
+	if SimappConfig.Info != nil {
+		httpVersion = SimappConfig.Info.HttpVersion
+	}
+	if httpVersion == 2 {
+		transport := &http.Transport{
+			MaxIdleConns:        100,
+			MaxIdleConnsPerHost: 100,
+			MaxConnsPerHost:     0,
+			IdleConnTimeout:     90 * time.Second,
+			DisableKeepAlives:   false,
+		}
+		// h2c requires HTTP1 to stay unset; setting it would make the transport fall back to HTTP/1.1
+		transport.Protocols = new(http.Protocols)
+		transport.Protocols.SetUnencryptedHTTP2(true)
 		client = &http.Client{
-			Transport: &http2.Transport{
-				AllowHTTP: true,
-				DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
-					return (&net.Dialer{}).DialContext(ctx, network, addr)
-				},
-				StrictMaxConcurrentStreams: false,
-			},
-			Timeout: 30 * time.Second,
+			Transport: transport,
+			Timeout:   30 * time.Second,
 		}
 	} else {
 		transport := &http.Transport{
